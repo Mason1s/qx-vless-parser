@@ -1,961 +1,1385 @@
 /**
- * Quantumult X - Minimal VLESS Resource Parser
+ * Quantumult X - VLESS Only Resource Parser
  *
- * Supported:
- * - VLESS + TCP
- * - VLESS + TLS
- * - VLESS + WebSocket (WS/WSS)
- * - VLESS + REALITY
- * - REALITY + xtls-rprx-vision
+ * 精简自 KOP-XIAO resource-parser 的 VLESS 处理逻辑
  *
- * Security:
- * - No network requests
- * - No eval()
- * - No remote code execution
- * - No subscription/node information upload
+ * 保留：
+ * - VLESS TCP
+ * - VLESS TLS
+ * - VLESS WS/WSS
+ * - VLESS Reality
+ * - VLESS Reality + Vision
+ * - 普通 VLESS URI
+ * - Base64 VLESS 订阅
+ * - server / uri 资源类型
  *
- * Unsupported transports:
- * - gRPC
- * - XHTTP
- * - H2
- * - mKCP/KCP
- * - HTTP Upgrade
+ * 删除：
+ * - SS / SSR
+ * - VMess
+ * - Trojan
+ * - AnyTLS
+ * - Clash / Surge / Loon
+ * - Rewrite / Filter
+ * - rename / filter
+ * - eval
+ * - 网络请求
+ * - UA Retry
  */
 
 (function () {
   "use strict";
 
-
   // =========================================================
-  // URI Decode
-  // =========================================================
-
-  function safeDecodeURIComponent(s) {
-    try {
-      return decodeURIComponent(s || "");
-    } catch (_) {
-      return s || "";
-    }
-  }
-
-
-  // =========================================================
-  // UTF-8 Decode
+  // Quantumult X 环境
   // =========================================================
 
-  function utf8Decode(bin) {
-    var out = "";
-    var i = 0;
-    var c, c2, c3, c4, cp;
+  var resource =
+    typeof $resource !== "undefined"
+      ? $resource
+      : {};
 
-    while (i < bin.length) {
+  var link0 =
+    String(resource.link || "");
 
-      c = bin.charCodeAt(i++) & 255;
+  var content0 =
+    String(resource.content || "");
 
-      if (c < 0x80) {
-
-        out += String.fromCharCode(c);
-
-      } else if ((c & 0xE0) === 0xC0) {
-
-        if (i >= bin.length) break;
-
-        c2 = bin.charCodeAt(i++) & 255;
-
-        out += String.fromCharCode(
-          ((c & 0x1F) << 6) |
-          (c2 & 0x3F)
-        );
-
-      } else if ((c & 0xF0) === 0xE0) {
-
-        if (i + 1 >= bin.length) break;
-
-        c2 = bin.charCodeAt(i++) & 255;
-        c3 = bin.charCodeAt(i++) & 255;
-
-        out += String.fromCharCode(
-          ((c & 0x0F) << 12) |
-          ((c2 & 0x3F) << 6) |
-          (c3 & 0x3F)
-        );
-
-      } else if ((c & 0xF8) === 0xF0) {
-
-        if (i + 2 >= bin.length) break;
-
-        c2 = bin.charCodeAt(i++) & 255;
-        c3 = bin.charCodeAt(i++) & 255;
-        c4 = bin.charCodeAt(i++) & 255;
-
-        cp =
-          ((c & 7) << 18) |
-          ((c2 & 63) << 12) |
-          ((c3 & 63) << 6) |
-          (c4 & 63);
-
-        cp -= 0x10000;
-
-        out += String.fromCharCode(
-          0xD800 + (cp >> 10),
-          0xDC00 + (cp & 0x3FF)
-        );
-      }
-    }
-
-    return out;
-  }
+  var typeQ =
+    String(resource.type || "unsupported");
 
 
   // =========================================================
-  // Base64 Decode
+  // Quantumult X Build
   // =========================================================
 
-  function base64Decode(input) {
-
-    var chars =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    var s = String(input || "")
-      .replace(/\s+/g, "")
-      .replace(/-/g, "+")
-      .replace(/_/g, "/");
-
-    while (s.length % 4) {
-      s += "=";
-    }
-
-    var out = "";
-
-    var i = 0;
-
-    var e1, e2, e3, e4;
-    var c1, c2, c3;
-
-    while (i < s.length) {
-
-      e1 = chars.indexOf(s.charAt(i++));
-      e2 = chars.indexOf(s.charAt(i++));
-      e3 = chars.indexOf(s.charAt(i++));
-      e4 = chars.indexOf(s.charAt(i++));
-
-      if (e1 < 0 || e2 < 0) {
-        break;
-      }
-
-      c1 = (e1 << 2) | (e2 >> 4);
-
-      out += String.fromCharCode(c1);
-
-      if (e3 >= 0) {
-
-        c2 =
-          ((e2 & 15) << 4) |
-          (e3 >> 2);
-
-        out += String.fromCharCode(c2);
-      }
-
-      if (e4 >= 0) {
-
-        c3 =
-          ((e3 & 3) << 6) |
-          e4;
-
-        out += String.fromCharCode(c3);
-      }
-    }
-
-    return utf8Decode(out);
-  }
-
-
-  // =========================================================
-  // UTF-8 Encode
-  // =========================================================
-
-  function utf8Encode(str) {
-
-    var out = "";
-
-    var i = 0;
-    var c;
-    var cp;
-
-    for (; i < str.length; i++) {
-
-      c = str.charCodeAt(i);
-
-      if (c < 0x80) {
-
-        out += String.fromCharCode(c);
-
-      } else if (c < 0x800) {
-
-        out += String.fromCharCode(
-          0xC0 | (c >> 6)
-        );
-
-        out += String.fromCharCode(
-          0x80 | (c & 63)
-        );
-
-      } else if (
-        c >= 0xD800 &&
-        c <= 0xDBFF &&
-        i + 1 < str.length
-      ) {
-
-        cp =
-          ((c - 0xD800) << 10) +
-          (str.charCodeAt(++i) - 0xDC00) +
-          0x10000;
-
-        out += String.fromCharCode(
-          0xF0 | (cp >> 18)
-        );
-
-        out += String.fromCharCode(
-          0x80 | ((cp >> 12) & 63)
-        );
-
-        out += String.fromCharCode(
-          0x80 | ((cp >> 6) & 63)
-        );
-
-        out += String.fromCharCode(
-          0x80 | (cp & 63)
-        );
-
-      } else {
-
-        out += String.fromCharCode(
-          0xE0 | (c >> 12)
-        );
-
-        out += String.fromCharCode(
-          0x80 | ((c >> 6) & 63)
-        );
-
-        out += String.fromCharCode(
-          0x80 | (c & 63)
-        );
-      }
-    }
-
-    return out;
-  }
-
-
-  // =========================================================
-  // Base64 Encode
-  // =========================================================
-
-  function base64Encode(input) {
-
-    var chars =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    var bin = utf8Encode(
-      String(input || "")
-    );
-
-    var out = "";
-
-    var i = 0;
-
-    var c1, c2, c3;
-
-    var e1, e2, e3, e4;
-
-    while (i < bin.length) {
-
-      c1 =
-        bin.charCodeAt(i++) & 255;
-
-      c2 =
-        i < bin.length
-          ? bin.charCodeAt(i++) & 255
-          : NaN;
-
-      c3 =
-        i < bin.length
-          ? bin.charCodeAt(i++) & 255
-          : NaN;
-
-      e1 =
-        c1 >> 2;
-
-      e2 =
-        ((c1 & 3) << 4) |
-        (isNaN(c2) ? 0 : (c2 >> 4));
-
-      e3 =
-        isNaN(c2)
-          ? 64
-          : (
-              ((c2 & 15) << 2) |
-              (isNaN(c3) ? 0 : (c3 >> 6))
-            );
-
-      e4 =
-        isNaN(c3)
-          ? 64
-          : (c3 & 63);
-
-      out += chars.charAt(e1);
-
-      out += chars.charAt(e2);
-
-      out +=
-        e3 === 64
-          ? "="
-          : chars.charAt(e3);
-
-      out +=
-        e4 === 64
-          ? "="
-          : chars.charAt(e4);
-    }
-
-    return out;
-  }
-
-
-  // =========================================================
-  // Parse URL Query
-  // =========================================================
-
-  function parseQuery(qs) {
-
-    var obj = {};
-
-    if (!qs) {
-      return obj;
-    }
-
-    qs.split("&").forEach(function (part) {
-
-      if (!part) {
-        return;
-      }
-
-      var p =
-        part.indexOf("=");
-
-      var k =
-        p >= 0
-          ? part.slice(0, p)
-          : part;
-
-      var v =
-        p >= 0
-          ? part.slice(p + 1)
-          : "";
-
-      k =
-        safeDecodeURIComponent(k)
-          .toLowerCase();
-
-      v =
-        safeDecodeURIComponent(v);
-
-      obj[k] = v;
-    });
-
-    return obj;
-  }
-
-
-  // =========================================================
-  // Node Name
-  // =========================================================
-
-  function sanitizeTag(tag, fallback) {
-
-    tag =
-      String(
-        tag ||
-        fallback ||
-        "VLESS"
-      )
-      .replace(
-        /[\r\n]+/g,
-        " "
-      )
-      .replace(
-        /,/g,
-        "，"
-      )
-      .trim();
-
-    return tag || "VLESS";
-  }
-
-
-  // =========================================================
-  // Subscription Content
-  // =========================================================
-
-  function normalizeContent(content) {
-
-    var s =
-      String(content || "")
-        .trim();
-
-    if (!s) {
-      return "";
-    }
-
-    // Already plain VLESS URI
-    if (
-      s.indexOf("vless://") !== -1
-    ) {
-      return s;
-    }
-
-    // Try Base64 subscription
-    if (
-      /^[A-Za-z0-9+/_=\-\r\n]+$/.test(s)
-    ) {
-
-      try {
-
-        var decoded =
-          base64Decode(s);
-
-        if (
-          decoded.indexOf("vless://") !== -1
-        ) {
-          return decoded;
-        }
-
-      } catch (_) {}
-    }
-
-    return s;
-  }
-
-
-  // =========================================================
-  // Server Address
-  // =========================================================
-
-  function parseAuthority(authority) {
-
-    // IPv6:
-    // [2001:db8::1]:443
-
-    var m =
-      authority.match(
-        /^\[([^\]]+)\]:(\d+)$/
-      );
-
-    if (m) {
-
-      return {
-        endpoint:
-          "[" +
-          m[1] +
-          "]:" +
-          m[2]
-      };
-    }
-
-    // IPv4 / domain
-    var idx =
-      authority.lastIndexOf(":");
-
-    if (idx <= 0) {
-      return null;
-    }
-
-    var host =
-      authority.slice(0, idx);
-
-    var port =
-      authority.slice(idx + 1);
-
-    if (!/^\d+$/.test(port)) {
-      return null;
-    }
-
-    return {
-      endpoint:
-        host +
-        ":" +
-        port
-    };
-  }
-
-
-  // =========================================================
-  // Parse VLESS URI
-  // =========================================================
-
-  function parseVless(uri) {
-
-    uri =
-      String(uri || "")
-        .trim();
-
-    if (
-      uri.indexOf("vless://") !== 0
-    ) {
-      return null;
-    }
-
-
-    // Remove vless://
-    var body =
-      uri.slice(8);
-
-
-    // ---------------------------------------------------------
-    // Node name
-    // ---------------------------------------------------------
-
-    var hashPos =
-      body.indexOf("#");
-
-    var tag = "";
-
-    if (hashPos >= 0) {
-
-      tag =
-        safeDecodeURIComponent(
-          body.slice(hashPos + 1)
-        );
-
-      body =
-        body.slice(0, hashPos);
-    }
-
-
-    // ---------------------------------------------------------
-    // Query
-    // ---------------------------------------------------------
-
-    var qPos =
-      body.indexOf("?");
-
-    var query =
-      qPos >= 0
-        ? body.slice(qPos + 1)
-        : "";
-
-    var main =
-      qPos >= 0
-        ? body.slice(0, qPos)
-        : body;
-
-
-    // ---------------------------------------------------------
-    // UUID + Server
-    // ---------------------------------------------------------
-
-    var atPos =
-      main.lastIndexOf("@");
-
-    if (atPos <= 0) {
-      return null;
-    }
-
-
-    var uuid =
-      safeDecodeURIComponent(
-        main.slice(0, atPos)
-      )
-      .trim();
-
-
-    var authority =
-      main.slice(atPos + 1)
-        .trim();
-
-
-    if (!uuid || !authority) {
-      return null;
-    }
-
-
-    var addr =
-      parseAuthority(authority);
-
-
-    if (!addr) {
-      return null;
-    }
-
-
-    // ---------------------------------------------------------
-    // Parameters
-    // ---------------------------------------------------------
-
-    var q =
-      parseQuery(query);
-
-
-    var transport =
-      String(
-        q.type || "tcp"
-      )
-      .toLowerCase();
-
-
-    var security =
-      String(
-        q.security ||
-        (
-          q.tls === "1"
-            ? "tls"
-            : "none"
-        )
-      )
-      .toLowerCase();
-
-
-    // ---------------------------------------------------------
-    // Unsupported transports
-    // ---------------------------------------------------------
-
-    if (
-      [
-        "grpc",
-        "xhttp",
-        "h2",
-        "mkcp",
-        "kcp",
-        "httpupgrade",
-        "http-upgrade"
-      ].indexOf(transport) !== -1
-    ) {
-      return null;
-    }
-
-
-    if (
-      transport !== "tcp" &&
-      transport !== "ws"
-    ) {
-      return null;
-    }
-
-
-    // ---------------------------------------------------------
-    // Security type
-    // ---------------------------------------------------------
-
-    var isTLS =
-      security === "tls";
-
-
-    var isReality =
-      security === "reality";
-
-
-    // ---------------------------------------------------------
-    // Common parameters
-    // ---------------------------------------------------------
-
-    var sni =
-      q.sni ||
-      q.servername ||
-      q.peer ||
-      "";
-
-
-    var wsHost =
-      q.host ||
-      "";
-
-
-    var path =
-      q.path ||
-      "";
-
-
-    var pbk =
-      q.pbk ||
-      q["public-key"] ||
-      "";
-
-
-    var sid =
-      q.sid ||
-      q["short-id"] ||
-      "";
-
-
-    var flow =
-      q.flow ||
-      "";
-
-
-    // Reality must have PBK
-    if (
-      isReality &&
-      !pbk
-    ) {
-      return null;
-    }
-
-
-    // =========================================================
-    // Quantumult X Result
-    // =========================================================
-
-    var out = [
-      "vless=" + addr.endpoint,
-      "method=none",
-      "password=" + uuid
-    ];
-
-
-    // ---------------------------------------------------------
-    // WebSocket
-    // ---------------------------------------------------------
-
-    if (
-      transport === "ws"
-    ) {
-
-      out.push(
-        "obfs=" +
-        (
-          isTLS || isReality
-            ? "wss"
-            : "ws"
-        )
-      );
-
-
-      if (
-        wsHost ||
-        sni
-      ) {
-
-        out.push(
-          "obfs-host=" +
-          (
-            wsHost ||
-            sni
-          )
-        );
-      }
-
-
-      if (path) {
-
-        out.push(
-          "obfs-uri=" +
-          path
-        );
-      }
-
-
-    // ---------------------------------------------------------
-    // TCP + TLS / Reality
-    // ---------------------------------------------------------
-
-    } else if (
-      isTLS ||
-      isReality
-    ) {
-
-      out.push(
-        "obfs=over-tls"
-      );
-
-
-      if (sni) {
-
-        out.push(
-          "obfs-host=" +
-          sni
-        );
-      }
-    }
-
-
-    // ---------------------------------------------------------
-    // Reality
-    // ---------------------------------------------------------
-
-    if (isReality) {
-
-      out.push(
-        "reality-base64-pubkey=" +
-        pbk
-      );
-
-
-      if (sid) {
-
-        out.push(
-          "reality-hex-shortid=" +
-          sid
-        );
-      }
-
-
-      if (
-        flow ===
-          "xtls-rprx-vision" ||
-        flow ===
-          "xtls-rprx-vision-udp443"
-      ) {
-
-        out.push(
-          "vless-flow=xtls-rprx-vision"
-        );
-      }
-
-
-    // ---------------------------------------------------------
-    // Normal TLS
-    // ---------------------------------------------------------
-
-    } else if (isTLS) {
-
-      var insecure =
-        String(
-          q.allowinsecure || ""
-        )
-        .toLowerCase();
-
-
-      out.push(
-        "tls-verification=" +
-        (
-          insecure === "1" ||
-          insecure === "true"
-            ? "false"
-            : "true"
-        )
-      );
-    }
-
-
-    // ---------------------------------------------------------
-    // UDP
-    // ---------------------------------------------------------
-
-    out.push(
-      "udp-relay=" +
-      (
-        q.udp === "1" ||
-        String(q.udp)
-          .toLowerCase() === "true"
-          ? "true"
-          : "false"
-      )
-    );
-
-
-    // ---------------------------------------------------------
-    // TCP Fast Open
-    // ---------------------------------------------------------
-
-    out.push(
-      "fast-open=" +
-      (
-        q.tfo === "1" ||
-        String(q.tfo)
-          .toLowerCase() === "true"
-          ? "true"
-          : "false"
-      )
-    );
-
-
-    // ---------------------------------------------------------
-    // Node name
-    // ---------------------------------------------------------
-
-    out.push(
-      "tag=" +
-      sanitizeTag(
-        tag,
-        "[vless] " +
-        addr.endpoint
-      )
-    );
-
-
-    return out.join(", ");
-  }
-
-
-  // =========================================================
-  // Main
-  // =========================================================
+  var version = 0;
 
   try {
 
     if (
-      typeof $resource === "undefined"
+      typeof $environment !== "undefined" &&
+      $environment.version
     ) {
 
-      $done({
-        error:
-          "No $resource object."
-      });
+      var buildMatch =
+        String($environment.version)
+          .match(/build\s*(\d+)/i);
 
-      return;
+      if (buildMatch) {
+        version =
+          Number(buildMatch[1]);
+      }
     }
 
+  } catch (_) {}
 
-    // Resource type:
-    // server / uri / filter / rewrite ...
 
-    var resourceType =
-      String(
-        $resource.type || ""
+  // =========================================================
+  // 订阅 URL 参数
+  //
+  // 支持：
+  // #udp=1
+  // #tfo=1
+  // #cert=1
+  // =========================================================
+
+  var para =
+    /^(http|https):\/\//i.test(link0)
+      ? link0
+      : (
+          content0
+            .split(/\r?\n/)[0] || ""
+        );
+
+
+  var hashPos =
+    para.indexOf("#");
+
+
+  var para1 =
+    hashPos >= 0
+      ? para.slice(hashPos + 1)
+      : "";
+
+
+  function getParam(
+    name,
+    fallback
+  ) {
+
+    var reg =
+      new RegExp(
+        "(?:^|&)" +
+        name +
+        "=([^&]*)",
+        "i"
       );
 
 
-    // ---------------------------------------------------------
-    // Get source
-    // ---------------------------------------------------------
+    var m =
+      para1.match(reg);
 
-    var source =
-      String(
-        $resource.content || ""
+
+    return m
+      ? m[1]
+      : fallback;
+  }
+
+
+  var Pudp0 =
+    getParam(
+      "udp",
+      0
+    );
+
+
+  var Ptfo0 =
+    getParam(
+      "tfo",
+      0
+    );
+
+
+  var Pcert0 =
+    getParam(
+      "cert",
+      getParam(
+        "tls-verification",
+        0
       )
-      .trim();
+    );
 
 
-    // Single VLESS URI may exist in $resource.link
+  // =========================================================
+  // Base64
+  // =========================================================
+
+  var Base64 = {
+
+    chars:
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+
+
+    utf8Encode: function (str) {
+
+      str =
+        String(str || "");
+
+      var out = "";
+
+      var i;
+      var c;
+      var cp;
+
+
+      for (
+        i = 0;
+        i < str.length;
+        i++
+      ) {
+
+        c =
+          str.charCodeAt(i);
+
+
+        if (
+          c < 0x80
+        ) {
+
+          out +=
+            String.fromCharCode(c);
+
+
+        } else if (
+          c < 0x800
+        ) {
+
+          out +=
+            String.fromCharCode(
+              0xC0 |
+              (c >> 6)
+            );
+
+
+          out +=
+            String.fromCharCode(
+              0x80 |
+              (c & 63)
+            );
+
+
+        } else if (
+          c >= 0xD800 &&
+          c <= 0xDBFF &&
+          i + 1 < str.length
+        ) {
+
+          cp =
+            (
+              (c - 0xD800)
+              << 10
+            ) +
+            (
+              str.charCodeAt(++i)
+              - 0xDC00
+            ) +
+            0x10000;
+
+
+          out +=
+            String.fromCharCode(
+              0xF0 |
+              (cp >> 18)
+            );
+
+
+          out +=
+            String.fromCharCode(
+              0x80 |
+              (
+                (cp >> 12) &
+                63
+              )
+            );
+
+
+          out +=
+            String.fromCharCode(
+              0x80 |
+              (
+                (cp >> 6) &
+                63
+              )
+            );
+
+
+          out +=
+            String.fromCharCode(
+              0x80 |
+              (cp & 63)
+            );
+
+
+        } else {
+
+          out +=
+            String.fromCharCode(
+              0xE0 |
+              (c >> 12)
+            );
+
+
+          out +=
+            String.fromCharCode(
+              0x80 |
+              (
+                (c >> 6) &
+                63
+              )
+            );
+
+
+          out +=
+            String.fromCharCode(
+              0x80 |
+              (c & 63)
+            );
+        }
+      }
+
+
+      return out;
+    },
+
+
+    utf8Decode: function (bin) {
+
+      var out = "";
+
+      var i = 0;
+
+      var c;
+      var c2;
+      var c3;
+      var c4;
+      var cp;
+
+
+      while (
+        i < bin.length
+      ) {
+
+        c =
+          bin.charCodeAt(i++)
+          & 255;
+
+
+        if (
+          c < 0x80
+        ) {
+
+          out +=
+            String.fromCharCode(c);
+
+
+        } else if (
+          (c & 0xE0)
+          === 0xC0
+        ) {
+
+          if (
+            i >= bin.length
+          ) {
+            break;
+          }
+
+
+          c2 =
+            bin.charCodeAt(i++)
+            & 255;
+
+
+          out +=
+            String.fromCharCode(
+              (
+                (c & 31)
+                << 6
+              ) |
+              (
+                c2 & 63
+              )
+            );
+
+
+        } else if (
+          (c & 0xF0)
+          === 0xE0
+        ) {
+
+          if (
+            i + 1 >=
+            bin.length
+          ) {
+            break;
+          }
+
+
+          c2 =
+            bin.charCodeAt(i++)
+            & 255;
+
+
+          c3 =
+            bin.charCodeAt(i++)
+            & 255;
+
+
+          out +=
+            String.fromCharCode(
+              (
+                (c & 15)
+                << 12
+              ) |
+              (
+                (c2 & 63)
+                << 6
+              ) |
+              (
+                c3 & 63
+              )
+            );
+
+
+        } else if (
+          (c & 0xF8)
+          === 0xF0
+        ) {
+
+          if (
+            i + 2 >=
+            bin.length
+          ) {
+            break;
+          }
+
+
+          c2 =
+            bin.charCodeAt(i++)
+            & 255;
+
+
+          c3 =
+            bin.charCodeAt(i++)
+            & 255;
+
+
+          c4 =
+            bin.charCodeAt(i++)
+            & 255;
+
+
+          cp =
+            (
+              (c & 7)
+              << 18
+            ) |
+            (
+              (c2 & 63)
+              << 12
+            ) |
+            (
+              (c3 & 63)
+              << 6
+            ) |
+            (
+              c4 & 63
+            );
+
+
+          cp -=
+            0x10000;
+
+
+          out +=
+            String.fromCharCode(
+              0xD800 +
+              (cp >> 10),
+
+              0xDC00 +
+              (cp & 1023)
+            );
+        }
+      }
+
+
+      return out;
+    },
+
+
+    encode: function (input) {
+
+      var bin =
+        this.utf8Encode(
+          input
+        );
+
+
+      var chars =
+        this.chars;
+
+
+      var out = "";
+
+      var i = 0;
+
+      var c1;
+      var c2;
+      var c3;
+
+      var e1;
+      var e2;
+      var e3;
+      var e4;
+
+
+      while (
+        i < bin.length
+      ) {
+
+        c1 =
+          bin.charCodeAt(i++)
+          & 255;
+
+
+        c2 =
+          i < bin.length
+            ? (
+                bin.charCodeAt(i++)
+                & 255
+              )
+            : NaN;
+
+
+        c3 =
+          i < bin.length
+            ? (
+                bin.charCodeAt(i++)
+                & 255
+              )
+            : NaN;
+
+
+        e1 =
+          c1 >> 2;
+
+
+        e2 =
+          (
+            (c1 & 3)
+            << 4
+          ) |
+          (
+            isNaN(c2)
+              ? 0
+              : (
+                  c2 >> 4
+                )
+          );
+
+
+        e3 =
+          isNaN(c2)
+            ? 64
+            : (
+                (
+                  (c2 & 15)
+                  << 2
+                ) |
+                (
+                  isNaN(c3)
+                    ? 0
+                    : (
+                        c3 >> 6
+                      )
+                )
+              );
+
+
+        e4 =
+          isNaN(c3)
+            ? 64
+            : (
+                c3 & 63
+              );
+
+
+        out +=
+          chars.charAt(e1);
+
+
+        out +=
+          chars.charAt(e2);
+
+
+        out +=
+          e3 === 64
+            ? "="
+            : chars.charAt(e3);
+
+
+        out +=
+          e4 === 64
+            ? "="
+            : chars.charAt(e4);
+      }
+
+
+      return out;
+    },
+
+
+    decode: function (input) {
+
+      var chars =
+        this.chars;
+
+
+      var s =
+        String(input || "")
+          .replace(
+            /\s+/g,
+            ""
+          )
+          .replace(
+            /-/g,
+            "+"
+          )
+          .replace(
+            /_/g,
+            "/"
+          );
+
+
+      while (
+        s.length % 4
+      ) {
+        s += "=";
+      }
+
+
+      var out = "";
+
+      var i = 0;
+
+      var e1;
+      var e2;
+      var e3;
+      var e4;
+
+      var c1;
+      var c2;
+      var c3;
+
+
+      while (
+        i < s.length
+      ) {
+
+        e1 =
+          chars.indexOf(
+            s.charAt(i++)
+          );
+
+
+        e2 =
+          chars.indexOf(
+            s.charAt(i++)
+          );
+
+
+        e3 =
+          chars.indexOf(
+            s.charAt(i++)
+          );
+
+
+        e4 =
+          chars.indexOf(
+            s.charAt(i++)
+          );
+
+
+        if (
+          e1 < 0 ||
+          e2 < 0
+        ) {
+          break;
+        }
+
+
+        c1 =
+          (
+            e1 << 2
+          ) |
+          (
+            e2 >> 4
+          );
+
+
+        out +=
+          String.fromCharCode(c1);
+
+
+        if (
+          e3 >= 0
+        ) {
+
+          c2 =
+            (
+              (e2 & 15)
+              << 4
+            ) |
+            (
+              e3 >> 2
+            );
+
+
+          out +=
+            String.fromCharCode(c2);
+        }
+
+
+        if (
+          e4 >= 0
+        ) {
+
+          c3 =
+            (
+              (e3 & 3)
+              << 6
+            ) |
+            e4;
+
+
+          out +=
+            String.fromCharCode(c3);
+        }
+      }
+
+
+      return this.utf8Decode(
+        out
+      );
+    }
+  };
+
+
+  // =========================================================
+  // 安全 URI Decode
+  // =========================================================
+
+  function decodeSafe(s) {
+
+    try {
+
+      return decodeURIComponent(
+        s
+      );
+
+    } catch (_) {
+
+      return s;
+    }
+  }
+
+
+  // =========================================================
+  // TLS Certificate
+  //
+  // 保持 KOP 默认行为：
+  // 默认 tls-verification=false
+  // =========================================================
+
+  function tlsCertValue(
+    cert
+  ) {
+
+    var raw =
+      cert === undefined ||
+      cert === null
+        ? ""
+        : String(cert).trim();
+
+
+    if (!raw) {
+      return "";
+    }
+
+
+    raw =
+      decodeSafe(raw)
+        .trim();
+
+
+    var low =
+      raw.toLowerCase();
+
+
     if (
-      source.indexOf("vless://") === -1 &&
-      typeof $resource.link === "string" &&
-      $resource.link.indexOf("vless://") === 0
+      low === "1" ||
+      low === "true"
+    ) {
+      return "true";
+    }
+
+
+    if (
+      low === "-1" ||
+      low === "0" ||
+      low === "false"
+    ) {
+      return "false";
+    }
+
+
+    if (
+      version >= 938 &&
+      /^(?=.{1,253}$)(?!-)(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z0-9-]{2,63}$/.test(raw)
+    ) {
+      return raw;
+    }
+
+
+    return "";
+  }
+
+
+  function tlsCertParam(
+    cert,
+    fallback
+  ) {
+
+    var value =
+      tlsCertValue(cert);
+
+
+    if (
+      value === ""
+    ) {
+      value =
+        fallback;
+    }
+
+
+    if (
+      value === "" ||
+      value === undefined ||
+      value === null
     ) {
 
-      source =
-        $resource.link;
+      return "";
+    }
+
+
+    return (
+      "tls-verification=" +
+      value
+    );
+  }
+
+
+  // =========================================================
+  // 读取 VLESS 参数
+  // =========================================================
+
+  function readParam(
+    content,
+    name
+  ) {
+
+    var key =
+      name + "=";
+
+
+    var pos =
+      content.indexOf(key);
+
+
+    if (
+      pos === -1
+    ) {
+      return "";
+    }
+
+
+    return content
+      .slice(
+        pos + key.length
+      )
+      .split("&")[0]
+      .split("#")[0]
+      .replace(
+        /\s/g,
+        ""
+      );
+  }
+
+
+  // =========================================================
+  // Reality
+  //
+  // pbk  -> reality-base64-pubkey
+  // sid  -> reality-hex-shortid
+  // flow -> vless-flow
+  // =========================================================
+
+  function realityHandle(
+    content
+  ) {
+
+    var result = [];
+
+
+    var pbk =
+      readParam(
+        content,
+        "pbk"
+      );
+
+
+    var sid =
+      readParam(
+        content,
+        "sid"
+      );
+
+
+    if (pbk) {
+
+      result.push(
+        "reality-base64-pubkey=" +
+        pbk
+      );
+    }
+
+
+    if (sid) {
+
+      result.push(
+        "reality-hex-shortid=" +
+        sid
+      );
+    }
+
+
+    if (
+      content.indexOf(
+        "flow=xtls-rprx-vision"
+      ) !== -1 ||
+      content.indexOf(
+        "xtls=2"
+      ) !== -1
+    ) {
+
+      result.push(
+        "vless-flow=xtls-rprx-vision"
+      );
+    }
+
+
+    return result.join(
+      ", "
+    );
+  }
+
+
+  // =========================================================
+  // VLESS -> Quantumult X
+  //
+  // 核心按照原版 VL2QX 行为处理
+  // =========================================================
+
+  function VL2QX(
+    subs
+  ) {
+
+    var parts =
+      String(subs)
+        .split("vless://");
+
+
+    if (
+      parts.length < 2
+    ) {
+      return "";
+    }
+
+
+    var cnt =
+      parts
+        .slice(1)
+        .join("vless://");
+
+
+    // 当前精简版只处理标准 VLESS URI
+    if (
+      cnt.indexOf("@") === -1
+    ) {
+      return "";
+    }
+
+
+    var ip =
+      cnt
+        .split("@")[1]
+        .split("encry")[0]
+        .split("?")[0];
+
+
+    var pwd =
+      "password=" +
+      cnt.split("@")[0];
+
+
+    var method =
+      "method=none";
+
+
+    var tag =
+      cnt.indexOf("#") !== -1
+        ? (
+            "tag=" +
+            decodeSafe(
+              cnt
+                .split("#")
+                .slice(-1)[0]
+            )
+          )
+        : (
+            "tag= [vless]" +
+            ip
+          );
+
+
+    var obfs = "";
+
+    var thost = "";
+
+    var puri = "";
+
+    var pcert = "";
+
+
+    // ---------------------------------------------------------
+    // 初始 SNI
+    // ---------------------------------------------------------
+
+    if (
+      cnt.indexOf("sni=") !== -1
+    ) {
+
+      thost =
+        "tls-host=" +
+        cnt
+          .split("sni=")[1]
+          .split(/&|#/)[0];
+    }
+
+
+    if (
+      cnt.indexOf("peer=") !== -1
+    ) {
+
+      thost =
+        "tls-host=" +
+        cnt
+          .split("peer=")[1]
+          .split(/&|#/)[0];
     }
 
 
     // ---------------------------------------------------------
-    // Decode subscription
+    // V2RayN 标准 VLESS URI
     // ---------------------------------------------------------
 
-    var content =
-      normalizeContent(source);
+    if (
+      cnt.indexOf("&type=ws") !== -1 ||
+      cnt.indexOf("?type=ws") !== -1 ||
+      cnt.indexOf("type=http") !== -1 ||
+      cnt.indexOf("security=tls") !== -1 ||
+      cnt.indexOf("security=reality") !== -1
+    ) {
+
+
+      // HTTP
+      if (
+        cnt.indexOf(
+          "type=http"
+        ) !== -1
+      ) {
+
+        obfs =
+          "obfs=http";
+
+
+      // WS
+      } else if (
+        cnt.indexOf(
+          "type=ws"
+        ) !== -1
+      ) {
+
+        obfs =
+          (
+            cnt.indexOf(
+              "security=tls"
+            ) !== -1 ||
+            cnt.indexOf(
+              "security=reality"
+            ) !== -1
+          )
+            ? "obfs=wss"
+            : "obfs=ws";
+
+
+      // TCP + TLS / Reality
+      } else if (
+        cnt.indexOf(
+          "type="
+        ) === -1 ||
+        cnt.indexOf(
+          "type=tcp"
+        ) !== -1
+      ) {
+
+        obfs =
+          "obfs=over-tls";
+
+
+      // 不支持
+      } else {
+
+        return "";
+      }
+
+
+      // -------------------------------------------------------
+      // Host
+      // -------------------------------------------------------
+
+      var host1 =
+        thost;
+
+
+      var host2 =
+        thost;
+
+
+      if (
+        cnt.indexOf(
+          "&host="
+        ) !== -1
+      ) {
+
+        host1 =
+          "obfs-host=" +
+          decodeSafe(
+            cnt
+              .split("&host=")[1]
+              .split("&")[0]
+              .split("#")[0]
+          );
+      }
+
+
+      if (
+        cnt.indexOf(
+          "sni="
+        ) !== -1
+      ) {
+
+        host2 =
+          "obfs-host=" +
+          decodeSafe(
+            cnt
+              .split("sni=")[1]
+              .split("&")[0]
+              .split("#")[0]
+          )
+          .replace(
+            /\"|(Host\":)|\{|\}/g,
+            ""
+          );
+      }
+
+
+      thost =
+        host1.length >=
+        host2.length
+          ? host1
+          : host2;
+
+
+      // -------------------------------------------------------
+      // WS Path
+      // -------------------------------------------------------
+
+      if (
+        cnt.indexOf(
+          "&path="
+        ) !== -1
+      ) {
+
+        puri =
+          "obfs-uri=" +
+          decodeSafe(
+            cnt
+              .split("&path=")[1]
+              .split("&")[0]
+              .split("#")[0]
+          );
+      }
+    }
+
+
+    // =========================================================
+    // TLS 验证
+    // =========================================================
+
+    if (
+      obfs === "obfs=wss" ||
+      obfs === "obfs=over-tls"
+    ) {
+
+      pcert =
+        tlsCertParam(
+          Pcert0,
+
+          cnt.indexOf(
+            "allowInsecure=0"
+          ) !== -1
+            ? "true"
+            : "false"
+        );
+
+    } else {
+
+      pcert = "";
+    }
+
+
+    // =========================================================
+    // UDP
+    //
+    // 保持原版默认 false
+    // =========================================================
+
+    var pudp =
+      (
+        String(Pudp0) === "1" ||
+        cnt.indexOf(
+          "udp=1"
+        ) !== -1
+      )
+        ? "udp-relay=true"
+        : "udp-relay=false";
+
+
+    // =========================================================
+    // Fast Open
+    //
+    // 保持原版默认 false
+    // =========================================================
+
+    var ptfo =
+      (
+        String(Ptfo0) === "1" ||
+        cnt.indexOf(
+          "tfo=1"
+        ) !== -1
+      )
+        ? "fast-open=true"
+        : "fast-open=false";
+
+
+    // =========================================================
+    // Reality
+    // =========================================================
+
+    var reality = "";
+
+
+    if (
+      version === 0 ||
+      version >= 891
+    ) {
+
+      reality =
+        realityHandle(
+          cnt
+        );
+    }
+
+
+    // =========================================================
+    // Quantumult X 节点
+    // =========================================================
+
+    var result = [
+
+      "vless=" + ip,
+
+      pwd,
+
+      method,
+
+      obfs,
+
+      pcert,
+
+      thost,
+
+      puri,
+
+      pudp,
+
+      ptfo,
+
+      reality,
+
+      tag
+
+    ]
+    .filter(Boolean)
+    .join(", ");
+
+
+    return result;
+  }
+
+
+  // =========================================================
+  // 订阅 Decode
+  //
+  // 原版同时支持：
+  // 1. 明文 URI
+  // 2. 整个订阅 Base64
+  // =========================================================
+
+  function decodeSubscription(
+    content
+  ) {
+
+    var src =
+      String(content || "")
+        .trim();
+
+
+    if (!src) {
+      return "";
+    }
+
+
+    // 已经是 VLESS URI
+    if (
+      src.indexOf(
+        "vless://"
+      ) !== -1
+    ) {
+
+      return src;
+    }
+
+
+    // 尝试 Base64
+    try {
+
+      var decoded =
+        Base64.decode(
+          src
+        );
+
+
+      if (
+        decoded.indexOf(
+          "vless://"
+        ) !== -1
+      ) {
+
+        return decoded;
+      }
+
+    } catch (_) {}
+
+
+    return src;
+  }
+
+
+  // =========================================================
+  // Subs2QX
+  //
+  // 原版 Subs2QX 的 VLESS-only 版本
+  // =========================================================
+
+  function Subs2QX(
+    content
+  ) {
+
+    var decoded =
+      decodeSubscription(
+        content
+      );
 
 
     var lines =
-      content.split(/\r?\n/);
+      decoded.split(
+        /\r?\n/
+      );
 
 
-    var nodes = [];
+    var result = [];
 
-
-    // ---------------------------------------------------------
-    // Parse every VLESS node
-    // ---------------------------------------------------------
 
     for (
       var i = 0;
@@ -968,66 +1392,124 @@
 
 
       if (
-        line.indexOf("vless://") !== 0
+        line.indexOf(
+          "vless://"
+        ) !== 0
       ) {
         continue;
       }
 
 
       var node =
-        parseVless(line);
+        VL2QX(
+          line
+        );
 
 
       if (node) {
 
-        nodes.push(node);
+        result.push(
+          node
+        );
       }
     }
 
 
+    return result;
+  }
+
+
+  // =========================================================
+  // Main
+  // =========================================================
+
+  try {
+
+
     // ---------------------------------------------------------
-    // No node
+    // 原版 VLESS 节点应进入 server / uri 类型
     // ---------------------------------------------------------
 
     if (
-      nodes.length === 0
+      typeQ !== "server" &&
+      typeQ !== "uri" &&
+      typeQ !== "unsupported" &&
+      typeQ !== ""
     ) {
 
       $done({
-        error:
-          "No valid VLESS node found. resource.type=" +
-          resourceType
+        content: ""
       });
 
       return;
     }
 
 
-    // =========================================================
-    // Important:
-    // Quantumult X node resource result is Base64 encoded.
-    // Same behavior as KOP-XIAO resource-parser.
-    // =========================================================
+    // ---------------------------------------------------------
+    // 一般情况从 content 获取
+    // ---------------------------------------------------------
 
-    var result =
-      nodes.join("\n");
+    var source =
+      content0;
 
 
-    result =
-      base64Encode(result);
+    // ---------------------------------------------------------
+    // 单条 URI 情况
+    // ---------------------------------------------------------
+
+    if (
+      !source.trim() &&
+      /^vless:\/\//i.test(
+        link0
+      )
+    ) {
+
+      source =
+        link0;
+    }
+
+
+    // ---------------------------------------------------------
+    // VLESS 转换
+    // ---------------------------------------------------------
+
+    var nodes =
+      Subs2QX(
+        source
+      );
+
+
+    // ---------------------------------------------------------
+    // 原版节点资源：
+    // Quantumult X 节点统一 Base64 返回
+    // ---------------------------------------------------------
+
+    var total =
+      nodes.length
+        ? Base64.encode(
+            nodes.join("\n")
+          )
+        : "";
 
 
     $done({
-      content: result
+      content: total
     });
 
 
-  } catch (e) {
+  } catch (error) {
 
+
+    console.log(
+      "VLESS parser error: " +
+      error
+    );
+
+
+    // 不返回 error 对象，
+    // 保持资源解析器 content 类型
     $done({
-      error:
-        "VLESS parser error: " +
-        e
+      content: ""
     });
   }
 

@@ -311,15 +311,15 @@ try {
     return;
   }
 
-  var result = nodes.join("\n");
+var result = nodes.join("\n");
 
-  // 节点订阅资源：Base64 返回，和 KOP 原版一致
-  if (resourceType === "server") {
-    result = base64Encode(result);
-  }
+// 节点订阅资源：Base64 返回，和 KOP 原版一致
+if (resourceType === "server") {
+  result = base64Encode(result);
+}
 
-  // 单条 URI：直接返回 Quantumult X 节点格式
-  $done({ content: result });
+// 单条 URI：直接返回 Quantumult X 节点格式
+$done({ content: result });
 
 } catch (e) {
   $done({

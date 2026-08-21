@@ -285,7 +285,7 @@
       if (node) nodes.push(node);
     }
 
-    $done({ content: base64Encode(nodes.join("\n")) });
+$done({ content: nodes.join("\n") });
   } catch (e) {
     console.log("Minimal VLESS parser error: " + e);
     $done({ content: "" });

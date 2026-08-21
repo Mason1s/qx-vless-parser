@@ -266,28 +266,64 @@
 
     return out.join(", ");
   }
-
-  try {
-    if (typeof $resource === "undefined") {
-      $done({ content: "" });
-      return;
-    }
-
-    var content = normalizeContent($resource.content);
-    var lines = content.split(/\r?\n/);
-    var nodes = [];
-
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i].trim();
-      if (line.indexOf("vless://") !== 0) continue;
-
-      var node = parseVless(line);
-      if (node) nodes.push(node);
-    }
-
-$done({ content: nodes.join("\n") });
-  } catch (e) {
-    console.log("Minimal VLESS parser error: " + e);
-    $done({ content: "" });
+try {
+  if (typeof $resource === "undefined") {
+    $done({ error: "No $resource object." });
+    return;
   }
+
+  var resourceType = String($resource.type || "");
+
+  // 普通订阅：节点在 content
+  var source = String($resource.content || "").trim();
+
+  // 单条 VLESS URI：兼容 URI 本身位于 link
+  if (
+    source.indexOf("vless://") === -1 &&
+    typeof $resource.link === "string" &&
+    $resource.link.indexOf("vless://") === 0
+  ) {
+    source = $resource.link;
+  }
+
+  var content = normalizeContent(source);
+  var lines = content.split(/\r?\n/);
+  var nodes = [];
+
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+
+    if (line.indexOf("vless://") !== 0) {
+      continue;
+    }
+
+    var node = parseVless(line);
+
+    if (node) {
+      nodes.push(node);
+    }
+  }
+
+  if (nodes.length === 0) {
+    $done({
+      error: "No valid VLESS node found. resource.type=" + resourceType
+    });
+    return;
+  }
+
+  var result = nodes.join("\n");
+
+  // 节点订阅资源：Base64 返回，和 KOP 原版一致
+  if (resourceType === "server") {
+    result = base64Encode(result);
+  }
+
+  // 单条 URI：直接返回 Quantumult X 节点格式
+  $done({ content: result });
+
+} catch (e) {
+  $done({
+    error: "VLESS parser error: " + e
+  });
+}
 })();
